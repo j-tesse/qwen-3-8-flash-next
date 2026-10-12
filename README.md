@@ -28,7 +28,7 @@ There is no custom Dockerfile — upstream's CUDA image is driven entirely by
 ## Usage
 
 ```sh
-git clone --recurse-submodules https://github.com/bitofant/qwen-3-8-flash-next
+git clone --recurse-submodules https://github.com/j-tesse/qwen-3-8-flash-next
 cd qwen-3-8-flash-next
 ./build-async.sh start && ./build-async.sh wait
 ./download-model.sh
