@@ -143,7 +143,12 @@ CSV=/home/joran/scripts/llama-startups.csv
 [ -f "$CSV" ] || echo "timestamp,container,duration_seconds" > "$CSV"
 echo "$(date -Is),${CONTAINER},$(( $(date +%s) - START_TIME ))" >> "$CSV"
 
-# 4. Re-point pi + OpenClaw at whatever :8000 now serves.
+# 4. Page the weights in — mmap is lazy, so without this the first agent request
+#    pays for faulting ~94gb off NVMe.
+say "warming up"
+./warmup.sh || echo -e "${Y}warmup failed (non-fatal)${RS}"
+
+# 5. Re-point pi + OpenClaw at whatever :8000 now serves.
 if [ -x /home/joran/scripts/update-agent-models.sh ]; then
   say "re-pointing agents at :${PORT}"
   # That script reads the context from vLLM's `max_model_len`, which llama.cpp
