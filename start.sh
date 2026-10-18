@@ -15,22 +15,21 @@ PORT=8000
 CONTEXT_SIZE=65536  # KV is only ~24kb/token (12 of 48 layers are full-attention), so
                     # 64k costs ~1.6gb VRAM. Cheap here, unlike a dense-attention model.
 THREADS=12          # physical cores only; SMT siblings thrash cache
-N_CPU_MOE=30        # expert layers pushed to RAM. STARTING ESTIMATE, not measured —
-                    # run ./tune.sh and fold the winner back in. See CLAUDE.md.
-UBATCH_SIZE=2048    # prefill streams the CPU experts over PCIe once per ubatch — big ubatch amortises it
-BATCH_SIZE=2048
+N_CPU_MOE=30        # tuned 2026-10-18: 26 OOMs, 34 decodes ~7% slower. See CLAUDE.md.
+UBATCH_SIZE=4096    # tuned: +40% prefill vs 2048, decode unchanged. VRAM 31.9 of 32.6gb.
+BATCH_SIZE=4096
 LOAD_MODE=mmap      # DO NOT set to `none`/--no-mmap on this box. It pins the CPU-resident
                     # weights unreclaimably; on the DeepSeek repo that left ~10gb and the
                     # OOM killer took out the agent 4min in. See CLAUDE.md.
 
-# The ~51B n-gram embedding table is not an "expert", so --n-cpu-moe does not move it.
-# Left on the GPU it would swallow VRAM that expert layers use far better.
+# ~51B n-gram table. b11719 already keeps it on CPU (measured: same VRAM without this);
+# kept as an explicit guard in case upstream placement changes.
 NGRAM_TENSORS="per_layer_token_embd=CPU"
 
-# Speculative decoding via the model's own MTP head. OFF until measured on this box —
-# see the decode arithmetic in CLAUDE.md before turning it on. Verify with ./bench-spec.sh.
+# MTP head. Measured OFF: needs N_CPU_MOE=34 + UBATCH/BATCH 2048 to fit, which costs ~40%
+# prefill for +4-11% decode (and -4% at 64k). Set those three together to try it.
 SPEC=0
-SPEC_DRAFT="MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+SPEC_DRAFT="MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"
 SPEC_N_MAX=2
 # ---------------------------------------------------------------------------
 
