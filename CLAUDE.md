@@ -25,8 +25,9 @@ qwen-3-8-flash-next/
 ├── update.sh           move submodule to a newer tag (ff-only, refuses dirty tree) + rebuild
 ├── download-model.sh   throw-away container pulls the GGUF (+ MTP draft) into ~/models/gguf
 ├── verify-model.sh     shard count + GGUF magic check, incl. optional draft/mmproj sidecars
-├── start.sh            free GPU → run container → wait healthy → re-point agents
+├── start.sh            free GPU → run container → wait healthy → warm up → re-point agents
 ├── stop.sh             stop container → restart vLLM  (`--no-restore` to skip)
+├── warmup.sh           repeat a short request until decode settles (mmap pages in lazily)
 ├── bench.sh            single-request prefill/decode + PCIe counters against :8000
 ├── bench-spec.sh       echo-a-file decode bench + MTP acceptance rate
 ├── tune.sh             sweep server flags, restarting the container per variant → tune.results
@@ -95,8 +96,14 @@ GPU: ~2gb dense + ~1.6gb KV @64k + ~2gb compute buffers + ~0.6gb overhead → ~2
 → ~19 expert layers fit → `--n-cpu-moe 29-30`. `start.sh` ships **30** as the conservative start.
 RAM then holds 27gb n-gram + 30 x 1.34 = ~40gb experts = **~67gb vs ~82gb available**, ~15gb headroom.
 
-**None of this is measured yet.** `N_CPU_MOE=30` is arithmetic, not a result. Run `./tune.sh` and
-fold the winner into `start.sh`, then replace this section with a table like the sibling repo's.
+**Measured 2026-09-01 at `N_CPU_MOE=30`: 31.6gb of 32.6gb VRAM, ~1gb spare.** Tighter than the
+~29gb estimated above — the estimate under-counted compute buffers and/or the dense part. It loads
+and serves 65536 ctx fine, but there is very little room, so treat 30 as a **ceiling, not a tuned
+value**: `tune.sh`'s `ncmoe34` variant (fewer expert layers on GPU) is the safety direction, and
+`ncmoe26` will likely OOM. Run `./tune.sh` and fold the winner in.
+
+RAM behaves as designed: ~5gb actually used, ~86gb of mmap'd weights sitting in reclaimable page
+cache, ~85gb still reported available. That is the OOM safety net working — see `--load-mode` below.
 
 ### The ~51B n-gram table must be pinned to CPU
 This is the big structural difference from DeepSeek V4, and the flag most likely to be got wrong.
@@ -123,11 +130,16 @@ Consequences:
   concern was garbage output from quantized KV, here it is simply that q8_0 would save under a
   gigabyte and is not worth any quality risk. Other users do run q8_0 on this model successfully.
 
-### Decode should be much faster than DeepSeek V4 — the experts are tiny
+### Decode is ~2x DeepSeek V4 — the experts are tiny
 Decode reads active expert weights from RAM: 10 of 512 experts x 4.92M params x ~0.53 bytes
 = ~26mb per CPU layer, x30 CPU layers = **~0.79gb/token**. DeepSeek V4 reads ~1.9gb/token and lands
-at 23-24 tok/s, so the RAM-streaming floor here is roughly 2.4x looser — order **40-60 tok/s** if
-streaming stays the binding constraint. Unverified; measure before quoting.
+at 23-24 tok/s, so the RAM-streaming floor here is ~2.4x looser.
+
+**Measured 2026-09-01 at `-ncmoe 30 -ub 2048`, IQ4_XS: decode settles at 47.3 tok/s**, matching the
+40-60 tok/s the arithmetic predicted. Caveat: that is a short prompt at shallow depth. Upstream
+reports decode decay with depth on this model, so this number does **not** generalise to long
+context until `bench.sh`'s 16k/64k rows are filled in. Prefill is not yet measured — warmup.sh's
+prefill figure is dominated by fixed overhead on a ~20-token prompt and is not a real reading.
 
 The dual-channel ceiling is unchanged (~96 GB/s theoretical, ~60-70 practical; RAM already at its
 rated 6000 MT/s, so no BIOS win). What changed is bytes-per-token, which is the only lever that ever
@@ -181,7 +193,9 @@ anyway rather than the hub's blobs/snapshots symlink layout.
 - `--restart no`: vLLM's container is `unless-stopped` and also binds 8000 — two auto-restarting
   containers would race for the port after a reboot.
 - `--threads 12`: physical cores only; SMT siblings thrash cache.
-- Health start period is generous — loading 94gb takes minutes.
+- Health start period is generous, but mmap means the server reports healthy in ~10s — long before
+  the weights are resident. A cold first request measured 18 tok/s against 47 warm, which is why
+  `start.sh` runs `warmup.sh` before re-pointing the agents.
 - `-b/-ub 2048`: carried over from the sibling repo as a starting point, on the same reasoning
   (prefill streams CPU experts over PCIe once per ubatch, so a big ubatch amortises the transfer).
   **Not yet confirmed on this model** — `tune.sh` sweeps 512 / 2048 / 4096.
