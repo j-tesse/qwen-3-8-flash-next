@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 QUANT="${QUANT:-UD-IQ4_XS}"
 DESTINATION="${DESTINATION:-/home/joran/models/gguf}"
-DRAFT="${DRAFT:-MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf}"
+DRAFT="${DRAFT:-MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf}"
 DIR="$DESTINATION/$QUANT"
 
 magic_ok() { head -c4 "$1" | grep -qa GGUF; }

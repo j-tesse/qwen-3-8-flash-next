@@ -19,10 +19,10 @@ Machine-level lessons carry over between them; **per-model numbers do not.**
 ## Architecture
 ```
 qwen-3-8-flash-next/
-├── llama.cpp/          upstream submodule, pinned to a release tag (b10752). Never edited.
+├── llama.cpp/          upstream submodule, pinned to a release tag (b11719). Never edited.
 ├── build.sh            builds upstream's .devops/cuda.Dockerfile (target: server) via build args
 ├── build-async.sh      start|status [--json]|wait|log|stop — build takes ~10-20min
-├── update.sh           move submodule to a newer tag (ff-only, refuses dirty tree) + rebuild
+├── update.sh           move submodule to a newer tag (refuses dirty submodule) + rebuild
 ├── download-model.sh   throw-away container pulls the GGUF (+ MTP draft) into ~/models/gguf
 ├── verify-model.sh     shard count + GGUF magic check, incl. optional draft/mmproj sidecars
 ├── start.sh            free GPU → run container → wait healthy → warm up → re-point agents
@@ -46,13 +46,17 @@ Image tags per build: `qwen-3-8-flash-next:b<N>`, `:<upstream-describe>`, `:late
 hacking on llama.cpp itself and **do not govern this repo** — we never edit the submodule.
 
 **Mainline llama.cpp is enough — do not switch to the `unslothai/llama.cpp` fork.** Unsloth's model
-card tells you to, because at the time of writing mainline lacked MTP. As of b10752 mainline has both
+card tells you to, because at the time of writing mainline lacked MTP. Since b10752 mainline has both
 `src/models/qwen4exp.cpp` and `COMMON_SPECULATIVE_TYPE_DRAFT_MTP` (`--spec-type draft-mtp`), so the
 fork buys nothing and would cost us the "pinned upstream tag" property.
 
 ## Model
 `unsloth/Qwen3.8-Flash-Next-GGUF`, quant **UD-IQ4_XS** (93.7gb, 3 shards). Released 2026-08-26 as a
 preview of the Qwen4 architecture (`model_type: qwen4_exp`).
+
+Unsloth re-uploaded all shards 2026-10-05 "due to upstream changes" (llama.cpp's qwen4exp rework,
+#29751/#29761). Current download is from then, served on b11719. Old b10752 + old shards are gone.
+If Unsloth re-uploads again, re-download **and** `./update.sh` together — the two move in lockstep.
 
 From the upstream `config.json` — these are read off the config, not measured:
 - **48 layers, hybrid attention.** `layer_types` cycles `[linear, linear, linear, full]`, so only
@@ -96,28 +100,38 @@ GPU: ~2gb dense + ~1.6gb KV @64k + ~2gb compute buffers + ~0.6gb overhead → ~2
 → ~19 expert layers fit → `--n-cpu-moe 29-30`. `start.sh` ships **30** as the conservative start.
 RAM then holds 27gb n-gram + 30 x 1.34 = ~40gb experts = **~67gb vs ~82gb available**, ~15gb headroom.
 
-**Measured 2026-09-01 at `N_CPU_MOE=30`: 31.6gb of 32.6gb VRAM, ~1gb spare.** Tighter than the
-~29gb estimated above — the estimate under-counted compute buffers and/or the dense part. It loads
-and serves 65536 ctx fine, but there is very little room, so treat 30 as a **ceiling, not a tuned
-value**: `tune.sh`'s `ncmoe34` variant (fewer expert layers on GPU) is the safety direction, and
-`ncmoe26` will likely OOM. Run `./tune.sh` and fold the winner in.
+**Tuned 2026-10-18 on b11719 (`tune.results`), ctx 65536:**
+
+| variant | VRAM | decode 512→64k | prefill 4.6k / 18k / 64k |
+|---|---|---|---|
+| ncmoe30 ub2048 | 30.5gb | 46 / 45 / 47 / 46 | 1654 / 1819 / 1669 |
+| ncmoe26 ub2048 | OOM (KV alloc) | | |
+| ncmoe34 ub2048 | 25.5gb | 43 / 43 / 44 / 42 | 1469 / 1602 / 1472 |
+| ncmoe30 ub512 | 29.8gb | 47 / 46 / 46 / 46 | 819 / 765 / 676 |
+| **ncmoe30 ub4096 (shipped)** | **31.9gb** | **47 / 46 / 47 / 46** | **2081 / 2479 / 2394** |
+| MTP n2, ncmoe34 ub2048 | 30.2gb | 51 / 48 / 50 / 44 | 1367 / 1529 / 1410 |
+
+`-ncmoe 30` is the floor (26 OOMs; 28 untried). ub4096 is pure win on prefill but leaves only ~0.7gb
+VRAM — anything that grows GPU use (bigger ctx, mmproj, MTP) needs `-ncmoe` raised to compensate.
 
 RAM behaves as designed: ~5gb actually used, ~86gb of mmap'd weights sitting in reclaimable page
 cache, ~85gb still reported available. That is the OOM safety net working — see `--load-mode` below.
 
-### The ~51B n-gram table must be pinned to CPU
-This is the big structural difference from DeepSeek V4, and the flag most likely to be got wrong.
-The n-gram embeddings are **not experts**, so `--n-cpu-moe` does not move them — left to their own
-devices they land on the GPU and eat ~27gb of VRAM that expert layers would use far better. Hence
-`--override-tensor per_layer_token_embd=CPU` in `start.sh`. They are sparse row lookups, so serving
-them from RAM is cheap in a way that streaming expert matrices is not.
+### The ~51B n-gram table lives on CPU
+This is the big structural difference from DeepSeek V4. The n-gram embeddings are **not experts**,
+so `--n-cpu-moe` does not move them. They are sparse row lookups, so serving them from RAM is cheap
+in a way that streaming expert matrices is not.
+
+**Measured: llama.cpp already keeps them on CPU.** `tune.sh`'s `ngram-on-gpu` variant (no `-ot`)
+matched `ncmoe34` exactly — same 25512MiB VRAM, same speed. `per_layer_token_embd` is classed
+`LLM_TENSOR_LAYER_INPUT` (a GET_ROWS input, like `token_embd`), which stays on CPU by default. The
+original "it would eat ~27gb of VRAM" claim was wrong. `start.sh` keeps
+`--override-tensor per_layer_token_embd=CPU` as an explicit guard only.
 
 Verified against the pinned tag: `src/models/qwen4exp.cpp` creates a single flat
 `per_layer_token_embd.weight` of `[ple_head_dim, ple_rows]`, so the `-ot` regex matches exactly one
 tensor. The `%s.ple.*` GGUF keys (`ngram_size`, `heads_per_ngram`, `head_vocab_sizes`) line up with
 the config's n-gram fields — PLE *is* the n-gram table.
-
-`tune.sh` has an `ngram-on-gpu` variant to confirm this is actually the right call on 32gb.
 
 ### KV cache is cheap here — spend context freely
 Only 12 of 48 layers keep a KV cache: 12 x 2 (K+V) x 2 KV heads x 256 head_dim x 2 bytes (f16)
@@ -135,20 +149,24 @@ Decode reads active expert weights from RAM: 10 of 512 experts x 4.92M params x 
 = ~26mb per CPU layer, x30 CPU layers = **~0.79gb/token**. DeepSeek V4 reads ~1.9gb/token and lands
 at 23-24 tok/s, so the RAM-streaming floor here is ~2.4x looser.
 
-**Measured 2026-09-01 at `-ncmoe 30 -ub 2048`, IQ4_XS: decode settles at 47.3 tok/s**, matching the
-40-60 tok/s the arithmetic predicted. Caveat: that is a short prompt at shallow depth. Upstream
-reports decode decay with depth on this model, so this number does **not** generalise to long
-context until `bench.sh`'s 16k/64k rows are filled in. Prefill is not yet measured — warmup.sh's
-prefill figure is dominated by fixed overhead on a ~20-token prompt and is not a real reading.
+**Measured, `-ncmoe 30 -ub 2048`, IQ4_XS** (warmup.sh short prompt; bench.sh rows, thinking off):
+
+| build | warm decode | bench.sh n=512 / 4.6k / 18.5k / 64.3k tokens | VRAM |
+|---|---|---|---|
+| b10752 (2026-09-01) | 47.3 tok/s | not run | 31.6gb |
+| b11719 (2026-10-18) | 49.1 tok/s | decode 42 / 40 / 42 / 45, prefill 588 / 1444 / 1748 / 1654 tok/s | 30.5gb |
+
+**No decode decay with depth on b11719** — 64k decodes as fast as 512. bench.sh's prompt ("Count
+slowly.") decodes a bit slower than warmup.sh's; compare rows within one script only.
+The ~1gb VRAM drop is plausibly #29825 ("halve the indexer score memory") — not isolated.
 
 The dual-channel ceiling is unchanged (~96 GB/s theoretical, ~60-70 practical; RAM already at its
 rated 6000 MT/s, so no BIOS win). What changed is bytes-per-token, which is the only lever that ever
 mattered.
 
 ### MTP speculative decoding is worth measuring here (unlike DeepSeek)
-`MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` (2.8gb) is the model's own MTP head as a standalone
-draft model. `-shared-` borrows embeddings from the main model and is both smaller and faster than
-the self-contained variant. Unsloth reports 64-66% acceptance and 1.34-1.67x **at greedy sampling**,
+The model's own MTP head ships as standalone draft GGUFs under `MTP/`; `-shared-` variants borrow
+embeddings from the main model (see below — mainline can't). Unsloth reports 64-66% acceptance and 1.34-1.67x **at greedy sampling**,
 falling off as temperature rises, and a *loss* (0.81-0.87x) at concurrency 8 — we run `--parallel 1`,
 so the concurrency caveat does not apply.
 
@@ -159,8 +177,14 @@ is not purely expert-streaming-bound. Because bytes/token here are ~2.4x lower, 
 part of the budget (48 layers of compute, 36 of them linear-attention, plus n-gram lookups) is a much
 bigger share than DeepSeek's ~0%, and there is real room for a draft to amortise it.
 
-So: plausible, not proven. `SPEC=0` in `start.sh` until `./bench-spec.sh` says otherwise — it prints
-acceptance rate alongside decode tok/s, and `tune.sh` has an `mtp-n2` variant.
+**Measured 2026-10-18, b11719 — shipped OFF (`SPEC=0`):**
+- **Mainline cannot use the `-shared-` heads** (`tensor 'token_embd.weight' not found`): it has no
+  cross-model tensor borrowing. Unsloth's MTP/README still says mainline lacks MTP at all — stale.
+  We use the self-contained `MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf` (4.1gb).
+- It only fits at `-ncmoe 34 -ub 2048`; ncmoe32 and any ub4096 combo OOM (draft compute buf 1-2gb).
+- Result vs shipped config: decode +4-11% to 18k, -4% at 64k; bench-spec echo 55 vs 45 tok/s, 100%
+  acceptance (greedy best case); prefill ~-40%. For long-context agent work at temp 1.0, prefill wins.
+- Revisit if upstream adds tensor borrowing (saves 1.3gb, may let it fit at ub4096).
 
 ### `--load-mode none` / `--no-mmap`: do not enable
 Not yet tested on this model, and the sibling repo's incident is reason enough to leave it alone.
@@ -180,9 +204,13 @@ under `hub/`. A GGUF there would be treated as an orphan and deleted. Keeping it
 (the path `~/scripts/llama.sh` already declares) avoids that, and llama.cpp wants a plain file path
 anyway rather than the hub's blobs/snapshots symlink layout.
 
+`~/models/gguf` is safe from the HF cleanup but **not** from `~/scripts/disk-cleanup.sh` (an interactive
+Claude session): it deleted the whole dir 2026-09-27 (logged in `~/scripts/DISK-CLEANUP.md`).
+Re-downloaded 2026-10-18. If `start.sh` says the model is missing, that is the likely cause.
+
 ## Flag choices worth remembering
-- `--override-tensor per_layer_token_embd=CPU`: the n-gram table. See above — the single most
-  important Qwen-specific flag.
+- `--override-tensor per_layer_token_embd=CPU`: the n-gram table. Redundant on b11719 (already
+  CPU by default), kept as a guard. See above.
 - **f16 KV cache** (no `--cache-type-k/-v`): KV is only 24kb/token, so quantizing saves ~nothing.
 - `--jinja`: required for the chat template / tool calling.
 - **Thinking mode is ON by default.** Sampling defaults follow the model card's thinking preset:
@@ -196,23 +224,23 @@ anyway rather than the hub's blobs/snapshots symlink layout.
 - Health start period is generous, but mmap means the server reports healthy in ~10s — long before
   the weights are resident. A cold first request measured 18 tok/s against 47 warm, which is why
   `start.sh` runs `warmup.sh` before re-pointing the agents.
-- `-b/-ub 2048`: carried over from the sibling repo as a starting point, on the same reasoning
-  (prefill streams CPU experts over PCIe once per ubatch, so a big ubatch amortises the transfer).
-  **Not yet confirmed on this model** — `tune.sh` sweeps 512 / 2048 / 4096.
+- `-b/-ub 4096`: prefill streams CPU experts over PCIe once per ubatch, so bigger amortises it.
+  Measured: 512 → 2048 → 4096 gives ~700 → ~1700 → ~2400 tok/s prefill at 64k; decode unaffected.
 - `start.sh` always recreates the container: the flags are baked in at create time, so reusing a
   stale one would silently ignore edits to the constants.
 
-## Known upstream issues (llama.cpp, as of b10752)
-Checked against the model's open issues; these are why some flags look the way they do.
+## Known upstream issues (llama.cpp, statuses rechecked 2026-10-18)
+These are why some flags look the way they do.
 - **#27911** — CUDA `invalid configuration argument` in `ggml_cuda_op_rms_norm_fused` under
   concurrent batching (`np=10`). Open. We run `--parallel 1`, which avoids it.
-- **#27871** — abort at the native 262144 depth on sm_121. Open. We cap at 65536.
-- **#27886** — vision issues. Open. One reason we serve text-only.
-- **#27964** — `--split-mode tensor` aborts on multi-GPU CUDA. N/A, single GPU.
+- **#27871** — abort at the native 262144 depth on sm_121. **Closed 2026-10-16.** We still cap at
+  65536; raising it is untested (KV would be ~6.4gb at 262k, see KV section).
+- **#27886** — vision issues. **Closed 2026-10-12.** Vision stays off to match the vLLM service.
+- **#27964** — `--split-mode tensor` aborts on multi-GPU CUDA. Open. N/A, single GPU.
 - **#28158 / #28206** — MTP speculative emitting an out-of-bounds token id on Vulkan; fix merged.
   CUDA-only here, but worth knowing if MTP output ever looks corrupt.
-- Users report **decode decay with depth** on llama.cpp for this model where vLLM stays flat.
-  `bench.sh` sweeps to 65536 specifically to catch this.
+- Users reported **decode decay with depth** on llama.cpp for this model. Not reproduced on b11719
+  (see decode table).
 
 ## Vision (not enabled)
 The model is multimodal but we serve text-only, matching the vLLM service this replaces and dodging

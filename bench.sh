@@ -7,9 +7,9 @@ cd "$(dirname "$0")"
 # --- configuration ---------------------------------------------------------
 ENDPOINT="http://localhost:8000"
 MODEL="Qwen3.8-Flash-Next"
-PROMPT_TOKENS=(512 4096 16384 65536)  # approximate prompt sizes to sweep.
-                                      # 65536 is here because upstream reports decode
-                                      # decay with depth on this model — see CLAUDE.md.
+PROMPT_TOKENS=(512 4096 16384 57000)  # filler words; ~1.13 tokens each, so 57000 ≈ 64.5k,
+                                      # just under the 65536 ctx. Deep row is here because
+                                      # upstream reports decode decay with depth — see CLAUDE.md.
 DECODE_TOKENS=150                     # tokens to generate per run
 THINKING=false                        # thinking mode is ON by default and would make
                                       # decode counts incomparable between runs
@@ -36,7 +36,7 @@ print(json.dumps({
  'model':'$MODEL',
  'messages':[{'role':'user','content':str(uuid.uuid4())+' '+p+'\nCount slowly.'}],
  'max_tokens':$DECODE_TOKENS,'stream':False,'cache_prompt':False,
- 'chat_template_kwargs':{'enable_thinking':$THINKING}}))
+ 'chat_template_kwargs':{'enable_thinking':'$THINKING'=='true'}}))
 " <<<"$prompt")
 
   local mon=""
@@ -44,7 +44,7 @@ print(json.dumps({
     gpucsv=$(mktemp); nvidia-smi dmon -s put -d 1 -c 600 >"$gpucsv" 2>/dev/null & mon=$!
   fi
 
-  local resp; resp=$(curl -s "$ENDPOINT/v1/chat/completions" -H 'Content-Type: application/json' -d "$body")
+  local resp; resp=$(curl -s "$ENDPOINT/v1/chat/completions" -H 'Content-Type: application/json' -d @- <<<"$body")
 
   [ -n "$mon" ] && { kill "$mon" 2>/dev/null || true; wait "$mon" 2>/dev/null || true; }
 

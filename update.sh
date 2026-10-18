@@ -17,7 +17,7 @@ git -C "$SUBMODULE" fetch --tags origin
 
 TAG="${1:-}"
 if [ -z "$TAG" ] || [ "$TAG" = --no-build ]; then
-  TAG=$(git -C "$SUBMODULE" tag -l 'b[0-9]*' --sort=-v:refname | head -1)
+  TAG=$(git -C "$SUBMODULE" for-each-ref --count=1 --sort=-v:refname --format='%(refname:short)' 'refs/tags/b[0-9]*')
 fi
 
 git -C "$SUBMODULE" checkout -q "$TAG"

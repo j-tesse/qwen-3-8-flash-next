@@ -45,11 +45,12 @@ This is tuned for one specific box (Ryzen 9 9900X, 96gb RAM, RTX 5090 / sm_120, 
 and hardcodes some personal paths (`/home/joran/...`, an agent-config sync hook in `start.sh`).
 Expect to edit at least `MODELS_DIR`, `N_CPU_MOE` and `THREADS`.
 
-Two choices worth carrying over regardless of hardware:
+Choices worth carrying over regardless of hardware:
 
-- **`--override-tensor per_layer_token_embd=CPU`** — the ~51B n-gram embedding table is not an
-  expert, so `--n-cpu-moe` does not move it. Left alone it lands on the GPU and eats VRAM that
-  expert layers use far better. These are sparse row lookups; RAM serves them cheaply.
+- **Big ubatch (`-b/-ub 4096`)** — prefill streams the RAM-resident experts over PCIe once per
+  ubatch. On a 5090 this gave ~40% more prefill than 2048 at no decode cost, if VRAM allows.
+- **MTP needs the self-contained draft on mainline llama.cpp** — the `-shared-` heads fail to load
+  (`token_embd.weight not found`); use `MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf`.
 - **Context is cheap on this model.** Only 12 of 48 layers are full-attention, so the KV cache is
   ~24kb/token — 64k context costs ~1.6gb, and quantizing the KV cache saves next to nothing.
 

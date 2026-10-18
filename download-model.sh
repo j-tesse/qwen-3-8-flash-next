@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 # --- configuration ---------------------------------------------------------
 REPOSITORY="unsloth/Qwen3.8-Flash-Next-GGUF"
 QUANT="UD-IQ4_XS"                        # 93.7 GB, 3 shards. See the quant ladder in CLAUDE.md.
-DRAFT="MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"   # 2.8 GB MTP head, for --spec-type draft-mtp
+DRAFT="MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"   # 4.1 GB self-contained MTP head; mainline cannot borrow tensors for -shared-
 WITH_DRAFT=1                             # 0 skips the MTP draft entirely
 WITH_MMPROJ=0                            # 1 also pulls mmproj-F16.gguf (vision) — see CLAUDE.md
 DESTINATION="/home/joran/models/gguf"    # NOT the HF cache — see CLAUDE.md

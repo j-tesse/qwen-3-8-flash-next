@@ -10,7 +10,7 @@ CONTAINER="llama_tune"
 MODELS_DIR="/home/joran/models/gguf"
 QUANT="UD-IQ4_XS"
 MODEL_FILE="Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf"
-DRAFT="MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+DRAFT="MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"
 ALIAS="Qwen3.8-Flash-Next"
 PORT=8000
 CONTEXT_SIZE=65536
@@ -30,7 +30,11 @@ VARIANTS=(
   "ngram-on-gpu    |-ncmoe 34 -b 2048 -ub 2048"
   # MTP speculative decoding. Expect a decode win only if decode is not purely
   # expert-streaming-bound — see CLAUDE.md.
-  "mtp-n2          |-ncmoe 30 -b 2048 -ub 2048 -ot per_layer_token_embd=CPU -md /models/${DRAFT} --spec-type draft-mtp --spec-draft-n-max 2 -ngld 999"
+  # The 4.1gb self-contained draft does not fit next to -ncmoe 30; give back 2-4 expert layers.
+  "mtp-n2-ncmoe32  |-ncmoe 32 -b 2048 -ub 2048 -ot per_layer_token_embd=CPU -md /models/${DRAFT} --spec-type draft-mtp --spec-draft-n-max 2 -ngld 999"
+  "mtp-n2-ncmoe34  |-ncmoe 34 -b 2048 -ub 2048 -ot per_layer_token_embd=CPU -md /models/${DRAFT} --spec-type draft-mtp --spec-draft-n-max 2 -ngld 999"
+  "mtp-n2-ub4096   |-ncmoe 34 -b 4096 -ub 4096 -ot per_layer_token_embd=CPU -md /models/${DRAFT} --spec-type draft-mtp --spec-draft-n-max 2 -ngld 999"
+  "mtp-n3-ub4096   |-ncmoe 34 -b 4096 -ub 4096 -ot per_layer_token_embd=CPU -md /models/${DRAFT} --spec-type draft-mtp --spec-draft-n-max 3 -ngld 999"
 )
 # ---------------------------------------------------------------------------
 
